@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Solver Rubik 3x3</title>
+<style>
+  :root{--bg:#f4f5f8;--card:#fff;--ink:#1c1f2a;--mut:#6a7085;--line:#d9dce6;--acc:#2f6bff}
+  @media (prefers-color-scheme:dark){:root{--bg:#12141b;--card:#1c1f2a;--ink:#eceef5;--mut:#9aa0b5;--line:#2e3344;--acc:#6b95ff}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,Arial,sans-serif;line-height:1.45}
+  main{max-width:720px;margin:0 auto;padding:16px}
+  h1{font-size:22px;margin:4px 0 2px}
+  p.sub{margin:0 0 14px;color:var(--mut)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:16px;margin:0 0 8px}
+  ol.how{margin:0;padding-left:20px;color:var(--mut);font-size:14px}
+  #palette{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .sw{width:44px;height:44px;border-radius:10px;border:3px solid transparent;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(0,0,0,.25)}
+  .sw.sel{border-color:var(--acc);transform:scale(1.08)}
+  .net{display:grid;grid-template-columns:repeat(12,1fr);gap:0;max-width:420px;margin:0 auto}
+  .face{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:2px}
+  .st{aspect-ratio:1;border-radius:6px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.3);cursor:pointer}
+  .st.c{cursor:default;outline:2px solid var(--ink);outline-offset:-2px}
+  .st.cur{outline:3px solid var(--acc);outline-offset:-3px}
+  .lbl{font-size:10px;color:var(--mut);text-align:center}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:10px 16px;border-radius:10px;cursor:pointer}
+  button.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+  button:disabled{opacity:.4;cursor:default}
+  #msg{margin-top:10px;font-size:14px}
+  #msg.err{color:#d9342b}
+  #steps{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+  .mv{padding:4px 9px;border-radius:8px;border:1px solid var(--line);font-weight:700;font-family:ui-monospace,Consolas,monospace;cursor:pointer}
+  .mv.done{opacity:.4}
+  .mv.now{background:var(--acc);color:#fff;border-color:var(--acc)}
+  #big{font-size:28px;font-weight:800;text-align:center;margin:6px 0}
+  #desc{text-align:center;color:var(--mut);min-height:22px}
+  table{border-collapse:collapse;font-size:13px;color:var(--mut)}td{padding:2px 10px 2px 0}
+</style>
+</head>
+<body>
+<main>
+  <h1>Solver Rubik 3×3</h1>
+  <p class="sub">Isi warna rubik kamu, lalu klik <b>Selesaikan</b>. Kamu dapat langkah-langkahnya satu per satu.</p>
+
+  <div class="card">
+    <h2>Cara pakai</h2>
+    <ol class="how">
+      <li>Pegang rubik dengan <b>pusat putih di atas</b> dan <b>pusat hijau menghadap kamu</b>.</li>
+      <li>Pilih warna di bawah, lalu klik kotak-kotak di denah sesuai rubik kamu. Kotak pusat (bergaris tebal) sudah terkunci.</li>
+      <li>Klik <b>Selesaikan</b>, lalu ikuti langkahnya.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>1. Isi warna</h2>
+    <div id="palette"></div>
+    <div class="net" id="net"></div>
+    <div class="row">
+      <button class="pri" id="solve">Selesaikan</button>
+      <button id="reset">Reset</button>
+      <button id="rand">Acak (untuk coba)</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="card" id="result" hidden>
+    <h2>2. Langkah penyelesaian <span id="count" style="color:var(--mut);font-weight:400"></span></h2>
+    <div id="big"></div>
+    <div id="desc"></div>
+    <div class="net" id="net2" style="max-width:300px;margin-top:10px"></div>
+    <div class="row" style="justify-content:center">
+      <button id="prev">◀ Sebelumnya</button>
+      <button class="pri" id="next">Berikutnya ▶</button>
+    </div>
+    <div id="steps"></div>
+    <h2 style="margin-top:14px">Arti simbol</h2>
+    <table>
+      <tr><td><b>U D</b></td><td>Atas, Bawah (Up, Down)</td></tr>
+      <tr><td><b>L R</b></td><td>Kiri, Kanan (Left, Right)</td></tr>
+      <tr><td><b>F B</b></td><td>Depan, Belakang (Front, Back)</td></tr>
+      <tr><td><b>R</b></td><td>putar sisi itu 90° searah jarum jam (lihat dari sisi tersebut)</td></tr>
+      <tr><td><b>R'</b></td><td>putar 90° berlawanan jarum jam</td></tr>
+      <tr><td><b>R2</b></td><td>putar 180°</td></tr>
+    </table>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/cubejs@1.3.2/lib/cube.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cubejs@1.3.2/lib/solve.js"></script>
+<script>
+// Urutan sisi sesuai notasi Kociemba: U R F D L B (masing-masing 9 stiker)
+const FACES = ['U','R','F','D','L','B'];
+const COLORS = {U:'#ffffff',R:'#d62c2c',F:'#1fa64a',D:'#ffd500',L:'#ff7a00',B:'#2458e6'};
+const NAMES  = {U:'Putih',R:'Merah',F:'Hijau',D:'Kuning',L:'Oranye',B:'Biru'};
+const FACE_NAME = {U:'atas',R:'kanan',F:'depan',D:'bawah',L:'kiri',B:'belakang'};
+// posisi sisi pada denah (kolom, baris) dalam grid 4x3 sisi
+const POS = {U:[1,0],L:[0,1],F:[1,1],R:[2,1],B:[3,1],D:[1,2]};
+
+let state = solvedState();   // array 54 huruf
+let sel = 'U';
+let moves = [], step = 0, startStr = '';
+
+function solvedState(){ return FACES.flatMap(f => Array(9).fill(f)); }
+const $ = id => document.getElementById(id);
+
+function drawNet(el, arr, editable, curFace){
+  el.innerHTML = '';
+  // grid 12 kolom x 3 baris sisi: tiap sisi menempati 3 kolom
+  for (let r=0;r<3;r++) for (let c=0;c<4;c++){
+    const f = FACES.find(x => POS[x][0]===c && POS[x][1]===r);
+    const cell = document.createElement('div');
+    cell.style.gridColumn = 'span 3';
+    if (f){
+      cell.className = 'face';
+      const fi = FACES.indexOf(f);
+      for (let k=0;k<9;k++){
+        const s = document.createElement('div');
+        const idx = fi*9+k;
+        s.className = 'st' + (k===4 ? ' c' : '');
+        s.style.background = COLORS[arr[idx]];
+        if (editable && k!==4) s.onclick = () => { state[idx] = sel; drawNet(el, state, true); setMsg(''); };
+        cell.appendChild(s);
+      }
+    }
+    el.appendChild(cell);
+  }
+}
+
+function drawPalette(){
+  const p = $('palette'); p.innerHTML='';
+  FACES.forEach(f=>{
+    const d = document.createElement('div');
+    d.className = 'sw'+(f===sel?' sel':'');
+    d.style.background = COLORS[f]; d.title = NAMES[f];
+    d.onclick = ()=>{ sel=f; drawPalette(); };
+    p.appendChild(d);
+  });
+}
+
+function setMsg(t, err){ const m=$('msg'); m.textContent=t; m.className = err?'err':''; }
+
+function validate(){
+  const cnt = {}; state.forEach(x => cnt[x]=(cnt[x]||0)+1);
+  for (const f of FACES) if (cnt[f]!==9)
+    return `Warna ${NAMES[f]} ada ${cnt[f]||0} kotak, seharusnya 9. Periksa lagi isiannya.`;
+  return null;
+}
+
+function explain(m){
+  if(!m) return 'Rubik sudah selesai! 🎉';
+  const f = FACE_NAME[m[0]];
+  if (m.endsWith("2")) return `Putar sisi ${f} 180°`;
+  if (m.endsWith("'")) return `Putar sisi ${f} 90° berlawanan jarum jam`;
+  return `Putar sisi ${f} 90° searah jarum jam`;
+}
+
+function showStep(){
+  $('big').textContent = step < moves.length ? moves[step] : '✔';
+  $('desc').textContent = step < moves.length ? explain(moves[step]) : explain(null);
+  $('count').textContent = `(${moves.length} langkah)`;
+  $('prev').disabled = step===0;
+  $('next').disabled = step>=moves.length;
+  const c = Cube.fromString(startStr);
+  if (step) c.move(moves.slice(0,step).join(' '));
+  drawNet($('net2'), c.asString().split(''), false);
+  const box = $('steps'); box.innerHTML='';
+  moves.forEach((m,i)=>{
+    const b = document.createElement('span');
+    b.className = 'mv'+(i<step?' done':'')+(i===step?' now':'');
+    b.textContent = m; b.onclick=()=>{ step=i; showStep(); };
+    box.appendChild(b);
+  });
+}
+
+let ready = false;
+function initSolver(){
+  if (ready) return;
+  Cube.initSolver(); ready = true;
+}
+
+$('solve').onclick = () => {
+  const e = validate();
+  if (e) return setMsg(e, true);
+  if (typeof Cube === 'undefined') return setMsg('Library solver gagal dimuat. Cek koneksi internet lalu muat ulang.', true);
+  setMsg('Menghitung... (pertama kali bisa beberapa detik)');
+  $('solve').disabled = true;
+  setTimeout(() => {
+    try {
+      initSolver();
+      startStr = state.join('');
+      const cube = Cube.fromString(startStr);
+      const sol = cube.solve().trim();
+      moves = sol ? sol.split(/\s+/) : [];
+      step = 0;
+      $('result').hidden = false;
+      setMsg(moves.length ? 'Selesai dihitung. Ikuti langkahnya di bawah.' : 'Rubik kamu sudah dalam keadaan selesai.');
+      showStep();
+      $('result').scrollIntoView({behavior:'smooth'});
+    } catch (err) {
+      $('result').hidden = true;
+      setMsg('Susunan warna ini tidak mungkin ada di rubik asli (ada kotak yang salah isi, atau orientasi tidak sesuai). Cek lagi tiap sisi, terutama warna yang mirip (oranye/merah, putih/kuning).', true);
+    }
+    $('solve').disabled = false;
+  }, 30);
+};
+
+$('reset').onclick = () => { state = solvedState(); drawNet($('net'), state, true); $('result').hidden = true; setMsg(''); };
+$('rand').onclick = () => {
+  initSolver();
+  const c = Cube.random(); state = c.asString().split('');
+  drawNet($('net'), state, true); $('result').hidden = true; setMsg('Rubik acak dibuat. Klik Selesaikan.');
+};
+$('prev').onclick = () => { if(step>0){ step--; showStep(); } };
+$('next').onclick = () => { if(step<moves.length){ step++; showStep(); } };
+
+drawPalette(); drawNet($('net'), state, true);
+</script>
+</body>
+</html>

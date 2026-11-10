@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Luna Run - Kabur dari Alien</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0820;overflow:hidden;touch-action:none;font-family:system-ui,Arial,sans-serif}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{height:100vh;max-width:100vw;aspect-ratio:480/800;background:#111;box-shadow:0 0 40px #000}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="480" height="800"></canvas></div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 480, H = 800, HOR = 250, GY = 640, F = 300, LW = 112;
+const FAR = 2600;
+
+// ---------- state ----------
+let state = 'menu';            // menu | play | over
+let best = 0;
+try { best = +localStorage.getItem('lunaBest') || 0; } catch (e) {}
+
+let lane, laneX, jumpY, vy, sliding, slideT, invuln, danger, dist, coins, speed, time, shake, flash;
+let objs = [], particles = [], nextSpawn, alienLane = [0, 0, 0], caughtT;
+
+function reset() {
+  lane = 0; laneX = 0; jumpY = 0; vy = 0; sliding = false; slideT = 0; invuln = 0;
+  danger = 0.15; dist = 0; coins = 0; speed = 520; time = 0; shake = 0; flash = 0;
+  objs = []; particles = []; nextSpawn = 900; caughtT = 0;
+}
+reset();
+
+// ---------- audio (tiny beeps) ----------
+let ac;
+function beep(f, d, type = 'square', v = 0.05) {
+  try {
+    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = f; g.gain.value = v;
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + d);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + d);
+  } catch (e) {}
+}
+
+// ---------- input ----------
+function act(a) {
+  if (state !== 'play') { if (a === 'start') startGame(); return; }
+  if (a === 'left' && lane > -1) { lane--; beep(300, .06); }
+  if (a === 'right' && lane < 1) { lane++; beep(340, .06); }
+  if (a === 'up' && jumpY === 0 && !sliding) { vy = 560; beep(520, .12, 'sine'); }
+  if (a === 'up' && jumpY === 0 && sliding) { sliding = false; vy = 560; }
+  if (a === 'down') { sliding = true; slideT = 0.7; if (jumpY > 0) vy = -900; beep(180, .1, 'sawtooth'); }
+}
+function startGame() { reset(); state = 'play'; }
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (['arrowleft', 'a'].includes(k)) act('left');
+  else if (['arrowright', 'd'].includes(k)) act('right');
+  else if (['arrowup', 'w', ' '].includes(k)) { if (state !== 'play') act('start'); else act('up'); e.preventDefault(); }
+  else if (['arrowdown', 's'].includes(k)) act('down');
+  else if (k === 'enter') act('start');
+});
+let tx, ty;
+cv.addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; e.preventDefault(); }, { passive: false });
+cv.addEventListener('touchend', e => {
+  const t = e.changedTouches[0], dx = t.clientX - tx, dy = t.clientY - ty;
+  if (state !== 'play') { act('start'); return; }
+  if (Math.hypot(dx, dy) < 20) { act('up'); return; }
+  if (Math.abs(dx) > Math.abs(dy)) act(dx > 0 ? 'right' : 'left'); else act(dy < 0 ? 'up' : 'down');
+});
+cv.addEventListener('mousedown', () => { if (state !== 'play') act('start'); });
+
+// ---------- projection ----------
+function P(lx, z, h = 0) {
+  const s = F / (F + z);
+  return { x: W / 2 + lx * LW * s, y: HOR + (GY - HOR) * s - h * s, s };
+}
+
+// ---------- spawning ----------
+function spawnRow() {
+  const types = ['low', 'high', 'block'];
+  const free = [-1, 0, 1][Math.random() * 3 | 0];
+  const z = FAR;
+  for (const l of [-1, 0, 1]) {
+    if (l === free) {
+      if (Math.random() < 0.8) {
+        const air = Math.random() < 0.3;
+        for (let i = 0; i < 5; i++) objs.push({ k: 'coin', lane: l, z: z + i * 70, h: air ? 85 : 28, got: false });
+      }
+    } else if (Math.random() < 0.85) {
+      objs.push({ k: types[Math.random() * (dist > 4000 ? 3 : 2) | 0] === 'high' ? 'high' : (Math.random() < 0.55 ? 'low' : (dist > 3000 ? 'block' : 'low')), lane: l, z, hit: false });
+    }
+  }
+}
+
+// ---------- update ----------
+function update(dt) {
+  time += dt;
+  if (state === 'play') {
+    speed = Math.min(1150, 520 + time * 11);
+    dist += speed * dt;
+    danger = Math.max(0.1, danger - 0.035 * dt);
+    laneX += (lane - laneX) * Math.min(1, dt * 14);
+    // jump physics
+    if (jumpY > 0 || vy > 0) { vy -= 1700 * dt; jumpY += vy * dt; if (jumpY <= 0) { jumpY = 0; vy = 0; } }
+    if (sliding) { slideT -= dt; if (slideT <= 0) sliding = false; }
+    invuln = Math.max(0, invuln - dt);
+    shake = Math.max(0, shake - dt * 30);
+    flash = Math.max(0, flash - dt * 3);
+
+    nextSpawn -= speed * dt;
+    if (nextSpawn <= 0) { spawnRow(); nextSpawn = 520 + Math.random() * 380 + speed * 0.25; }
+
+    for (const o of objs) {
+      o.z -= speed * dt;
+      if (o.k === 'coin') {
+        if (!o.got && o.lane === lane && Math.abs(o.z) < 28) {
+          const ok = o.h < 50 ? jumpY < 45 : jumpY > 35;
+          if (ok) { o.got = true; coins++; beep(900 + (coins % 5) * 80, .08, 'triangle', .06); burst(P(o.lane, 0, o.h), '#ffd23f', 6); }
+        }
+      } else if (!o.hit && o.z < 14 && o.z > -14 && o.lane === lane && invuln <= 0) {
+        let hit = false;
+        if (o.k === 'low') hit = jumpY < 42;
+        else if (o.k === 'high') hit = !sliding;
+        else hit = true;
+        if (hit) { o.hit = true; crash(); }
+      }
+    }
+    objs = objs.filter(o => o.z > -120 && !o.got);
+
+    if (danger >= 1) { state = 'over'; caughtT = 0; beep(120, .6, 'sawtooth', .1);
+      const sc = score(); if (sc > best) { best = sc; try { localStorage.setItem('lunaBest', best); } catch (e) {} } }
+  } else if (state === 'over') { caughtT += dt; }
+  else { laneX = Math.sin(time * 1.5) * 0.15; }
+
+  // aliens follow Luna with lag
+  for (let i = 0; i < 3; i++) alienLane[i] += (laneX + (i - 1) * 0.9 - alienLane[i]) * Math.min(1, dt * (5 + i));
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 600 * dt; p.t -= dt; }
+  particles = particles.filter(p => p.t > 0);
+}
+function crash() {
+  danger += 0.5; invuln = 1.2; shake = 14; flash = 1; beep(90, .3, 'sawtooth', .1);
+  burst(P(laneX, 0, 40), '#ff4d6d', 14);
+}
+function burst(p, col, n) { for (let i = 0; i < n; i++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - .5) * 300, vy: -Math.random() * 300, t: .5, c: col }); }
+const score = () => Math.floor(dist / 40) + coins * 10;
+
+// ---------- drawing ----------
+const stars = Array.from({ length: 60 }, () => [Math.random() * W, Math.random() * HOR * .9, Math.random() * 1.6 + .4]);
+const city = Array.from({ length: 16 }, (_, i) => [i * 32 - 10, 30 + Math.random() * 90, 20 + Math.random() * 22]);
+
+function drawBG() {
+  const g = ctx.createLinearGradient(0, 0, 0, HOR + 40);
+  g.addColorStop(0, '#120a3a'); g.addColorStop(.6, '#5b1f72'); g.addColorStop(1, '#ff6fa8');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, HOR + 40);
+  ctx.fillStyle = '#fff';
+  for (const s of stars) { ctx.globalAlpha = .4 + .6 * Math.abs(Math.sin(time + s[0])); ctx.fillRect(s[0], s[1], s[2], s[2]); }
+  ctx.globalAlpha = 1;
+  // moon
+  ctx.fillStyle = '#ffe9f3'; ctx.beginPath(); ctx.arc(380, 90, 32, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(91,31,114,.35)'; ctx.beginPath(); ctx.arc(370, 82, 10, 0, 7); ctx.fill();
+  // distant UFO
+  const ux = (time * 18) % (W + 100) - 50;
+  ctx.fillStyle = '#9af7c4'; ctx.beginPath(); ctx.ellipse(ux, 70 + Math.sin(time * 2) * 5, 22, 6, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(154,247,196,.6)'; ctx.beginPath(); ctx.ellipse(ux, 64 + Math.sin(time * 2) * 5, 10, 8, 0, Math.PI, 0); ctx.fill();
+  // city
+  const off = -laneX * 14;
+  for (const b of city) {
+    ctx.fillStyle = '#22103f'; ctx.fillRect(b[0] + off, HOR - b[1], b[2], b[1] + 2);
+    ctx.fillStyle = '#ffd98a';
+    for (let y = HOR - b[1] + 6; y < HOR - 4; y += 12) for (let x = b[0] + off + 4; x < b[0] + off + b[2] - 4; x += 8) if (((x * 7 + y * 13) | 0) % 5 < 2) ctx.fillRect(x, y, 3, 4);
+  }
+  // ground
+  ctx.fillStyle = '#1a0d33'; ctx.fillRect(0, HOR, W, H - HOR);
+}
+
+function drawRoad() {
+  const zn = -90, zf = FAR;
+  const a = P(-1.5, zf), b = P(1.5, zf), c = P(1.5, zn), d = P(-1.5, zn);
+  ctx.fillStyle = '#2b2a3f';
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.lineTo(d.x, d.y); ctx.fill();
+  // neon edges
+  for (const sx of [-1.5, 1.5]) {
+    const p1 = P(sx, zf), p2 = P(sx, zn);
+    ctx.strokeStyle = '#ff4fd8'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+  }
+  // lane dashes
+  const period = 160, o = dist % period;
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  for (let z = -o - 90; z < zf; z += period) {
+    for (const sx of [-.5, .5]) {
+      const p1 = P(sx, z), p2 = P(sx, z + 70);
+      if (p2.y < p1.y - .5) { const w1 = 3 * p1.s, w2 = 3 * p2.s;
+        ctx.beginPath(); ctx.moveTo(p1.x - w1, p1.y); ctx.lineTo(p1.x + w1, p1.y); ctx.lineTo(p2.x + w2, p2.y); ctx.lineTo(p2.x - w2, p2.y); ctx.fill(); }
+    }
+  }
+}
+
+function lamp(side, z) {
+  const base = P(side * 1.9, z), top = P(side * 1.9, z, 150);
+  ctx.strokeStyle = '#6a5a8a'; ctx.lineWidth = 4 * base.s; ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
+  ctx.fillStyle = '#7dffe1'; ctx.shadowColor = '#7dffe1'; ctx.shadowBlur = 12 * base.s;
+  ctx.beginPath(); ctx.arc(top.x, top.y, 7 * base.s, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+}
+
+function drawObj(o) {
+  if (o.k === 'coin') {
+    const p = P(o.lane, o.z, o.h), w = Math.abs(Math.cos(time * 5 + o.z * .02)) * 11 * p.s + 2;
+    ctx.fillStyle = '#ffd23f'; ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 2 * p.s;
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, w, 11 * p.s, 0, 0, 7); ctx.fill(); ctx.stroke(); return;
+  }
+  const p = P(o.lane, o.z), s = p.s, hw = 46 * s;
+  ctx.globalAlpha = o.hit ? .35 : Math.min(1, (FAR - o.z) / 500);
+  if (o.k === 'low') {
+    const h = 40 * s;
+    ctx.fillStyle = '#ff9f1c'; ctx.fillRect(p.x - hw, p.y - h, hw * 2, h);
+    ctx.fillStyle = '#222'; for (let i = 0; i < 6; i += 2) ctx.fillRect(p.x - hw + i * hw / 3, p.y - h, hw / 3, h);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 * s; ctx.strokeRect(p.x - hw, p.y - h, hw * 2, h);
+  } else if (o.k === 'high') {
+    const h = 110 * s, bh = 34 * s;
+    ctx.fillStyle = '#8d8da8'; ctx.fillRect(p.x - hw, p.y - h, 7 * s, h); ctx.fillRect(p.x + hw - 7 * s, p.y - h, 7 * s, h);
+    ctx.fillStyle = '#ff2e63'; ctx.fillRect(p.x - hw, p.y - h, hw * 2, bh);
+    ctx.fillStyle = '#fff'; for (let i = 0; i < 6; i += 2) ctx.fillRect(p.x - hw + i * hw / 3, p.y - h, hw / 3, bh);
+  } else {
+    const h = 130 * s;
+    ctx.fillStyle = '#4361ee'; ctx.fillRect(p.x - hw, p.y - h, hw * 2, h);
+    ctx.fillStyle = '#b8c0ff'; for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) ctx.fillRect(p.x - hw + 8 * s + c * hw * .65, p.y - h + 12 * s + r * 36 * s, hw * .4, 20 * s);
+    ctx.fillStyle = '#ff2e63'; ctx.beginPath(); ctx.arc(p.x, p.y - h - 6 * s, 6 * s, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function limb(x1, y1, x2, y2, w, col) {
+  ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+}
+
+function drawLuna() {
+  if (invuln > 0 && Math.floor(time * 16) % 2 === 0) return;
+  const p = P(laneX, 0, jumpY);
+  // shadow
+  const sh = P(laneX, 0, 0);
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.ellipse(sh.x, sh.y, 22 * sh.s * (1 - jumpY / 300), 6 * sh.s, 0, 0, 7); ctx.fill();
+  ctx.save(); ctx.translate(p.x, p.y); ctx.scale(p.s * 1.15, p.s * 1.15 * (sliding ? .55 : 1));
+  const ph = jumpY > 0 ? 1.2 : time * 14, skin = '#ffd1b3', dress = '#ff2e63', hair = '#2a1208';
+  const sw = jumpY > 0 ? 0.9 : 1;
+  // ponytail / long hair flowing behind
+  ctx.fillStyle = hair; ctx.beginPath();
+  const sway = Math.sin(ph * .9) * 8;
+  ctx.moveTo(-12, -100); ctx.quadraticCurveTo(-26 + sway, -70, -14 + sway * 1.5, -34); ctx.quadraticCurveTo(0, -60, 12, -34 + 0);
+  ctx.quadraticCurveTo(26 - sway, -70, 12, -100); ctx.fill();
+  // legs
+  for (let i = 0; i < 2; i++) {
+    const a = Math.sin(ph + i * Math.PI) * .7 * sw;
+    const fx = Math.sin(a) * 20, fy = -46 + Math.cos(a) * 44 - (jumpY > 0 ? i * 8 : Math.max(0, -Math.cos(ph + i * Math.PI)) * 6);
+    limb(i ? 5 : -5, -48, fx, fy, 8, skin);
+    ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.ellipse(fx, fy + 2, 8, 4, 0, 0, 7); ctx.fill();
+  }
+  // dress
+  ctx.fillStyle = dress; ctx.beginPath();
+  ctx.moveTo(-13, -84); ctx.lineTo(13, -84); ctx.lineTo(11, -62); ctx.lineTo(22, -40); ctx.lineTo(-22, -40); ctx.lineTo(-11, -62); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fillRect(-11, -64, 22, 3);
+  // arms
+  for (let i = 0; i < 2; i++) {
+    const a = Math.sin(ph + i * Math.PI + Math.PI) * .8 * sw;
+    limb(i ? 13 : -13, -82, (i ? 13 : -13) + Math.sin(a) * 14, -82 + Math.cos(a) * 28, 6, skin);
+  }
+  // head (back view) + hair top
+  ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(0, -95, 13, 0, 7); ctx.fill();
+  ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(0, -97, 14, Math.PI * .95, Math.PI * 2.05 + .1); ctx.lineTo(13, -92); ctx.quadraticCurveTo(0, -78, -13, -92); ctx.fill();
+  ctx.fillStyle = '#ff2e63'; ctx.beginPath(); ctx.arc(-9, -104, 4, 0, 7); ctx.fill(); // hair bow
+  ctx.restore();
+}
+
+function drawAlien(i) {
+  const z = -35 - 50 * (1 - Math.min(1, danger)) + (i === 1 ? -6 : 0);
+  const p = P(alienLane[i], z), s = p.s * 1.25, bob = Math.sin(time * 9 + i * 2) * 4;
+  const caught = state === 'over';
+  ctx.save(); ctx.translate(p.x, p.y + (caught ? -Math.min(caughtT, .6) * 60 : 0)); ctx.scale(s, s);
+  const cols = ['#7CFF6B', '#6BFFD6', '#C6FF6B'], col = cols[i];
+  // legs
+  limb(-10, -30, -14 + Math.sin(time * 12 + i) * 8, 0, 8, '#3d2a6b');
+  limb(10, -30, 14 - Math.sin(time * 12 + i) * 8, 0, 8, '#3d2a6b');
+  // body
+  ctx.fillStyle = '#5a3fa0'; ctx.beginPath(); ctx.ellipse(0, -48 + bob * .3, 20, 24, 0, 0, 7); ctx.fill();
+  // arms reaching up
+  limb(-18, -52, -34, -86 + bob, 7, col); limb(18, -52, 34, -86 + bob, 7, col);
+  ctx.fillStyle = col; ctx.beginPath(); ctx.arc(-35, -88 + bob, 6, 0, 7); ctx.arc(35, -88 + bob, 6, 0, 7); ctx.fill();
+  // head
+  ctx.fillStyle = col; ctx.beginPath(); ctx.ellipse(0, -84 + bob, 26, 30, 0, 0, 7); ctx.fill();
+  limb(-12, -110 + bob, -20, -136 + bob, 3, col); limb(12, -110 + bob, 20, -136 + bob, 3, col);
+  ctx.fillStyle = '#fff700'; ctx.beginPath(); ctx.arc(-20, -138 + bob, 5, 0, 7); ctx.arc(20, -138 + bob, 5, 0, 7); ctx.fill();
+  // eyes
+  ctx.fillStyle = '#111';
+  for (const sx of [-1, 1]) { ctx.beginPath(); ctx.ellipse(sx * 12, -86 + bob, 9, 14, sx * .5, 0, 7); ctx.fill(); }
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-14, -91 + bob, 2.5, 0, 7); ctx.arc(10, -91 + bob, 2.5, 0, 7); ctx.fill();
+  // mouth
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, -68 + bob, 8, .1, Math.PI - .1); ctx.stroke();
+  ctx.restore();
+}
+
+function render() {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+  drawBG(); drawRoad();
+  // lamps
+  const items = [];
+  const per = 300, o = dist % per;
+  for (let z = -o + per; z < FAR; z += per) { items.push({ z, f: () => { lamp(-1, z); lamp(1, z); } }); }
+  for (const ob of objs) items.push({ z: ob.z, f: () => drawObj(ob) });
+  items.push({ z: 0, f: drawLuna });
+  for (let i = 0; i < 3; i++) items.push({ z: -35 - 50 * (1 - Math.min(1, danger)) + (i === 1 ? -6 : 0) - 0.1, f: () => drawAlien(i) });
+  items.sort((a, b) => b.z - a.z);
+  for (const it of items) it.f();
+  // horizon fog
+  const fg = ctx.createLinearGradient(0, HOR - 10, 0, HOR + 110);
+  ctx.globalCompositeOperation = 'source-over';
+  fg.addColorStop(0, 'rgba(255,111,168,.0)'); fg.addColorStop(1, 'rgba(255,111,168,0)');
+  for (const p of particles) { ctx.globalAlpha = p.t * 2; ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y, 5, 5); }
+  ctx.globalAlpha = 1;
+  if (flash > 0) { ctx.fillStyle = `rgba(255,40,80,${flash * .35})`; ctx.fillRect(0, 0, W, H); }
+  ctx.restore();
+  hud();
+}
+
+function text(t, x, y, size, col = '#fff', align = 'center') {
+  ctx.font = `800 ${size}px system-ui,Arial`; ctx.textAlign = align; ctx.lineWidth = size / 6;
+  ctx.strokeStyle = 'rgba(20,0,40,.8)'; ctx.strokeText(t, x, y); ctx.fillStyle = col; ctx.fillText(t, x, y);
+}
+function hud() {
+  if (state !== 'menu') {
+    text(String(score()), 18, 44, 34, '#fff', 'left');
+    text('🪙 ' + coins, 18, 74, 20, '#ffd23f', 'left');
+    // danger meter
+    const bw = 140, bx = W - bw - 16, by = 24;
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(bx, by, bw, 16);
+    const d = Math.min(1, danger);
+    ctx.fillStyle = d > .6 ? '#ff2e63' : '#7CFF6B'; ctx.fillRect(bx, by, bw * d, 16);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(bx, by, bw, 16);
+    text('👽 ALIEN', bx + bw, by + 40, 16, '#b6ffa8', 'right');
+  }
+  if (state === 'menu') {
+    ctx.fillStyle = 'rgba(10,0,30,.55)'; ctx.fillRect(0, 0, W, H);
+    text('LUNA RUN', W / 2, 190, 64, '#ff6fa8');
+    text('Kabur dari Alien!', W / 2, 235, 26, '#9af7c4');
+    text('← → pindah jalur', W / 2, 330, 20);
+    text('↑ / Spasi  lompat', W / 2, 360, 20);
+    text('↓  menyelinap (bawah palang merah)', W / 2, 390, 20);
+    text('HP: swipe / tap', W / 2, 420, 18, '#ccc');
+    text('Tabrak rintangan = alien makin dekat!', W / 2, 470, 18, '#ffd23f');
+    if (Math.floor(time * 2) % 2 === 0) text('Tekan SPASI / ENTER / tap untuk main', W / 2, 560, 22, '#fff');
+    if (best) text('Rekor: ' + best, W / 2, 610, 20, '#ffd23f');
+  } else if (state === 'over') {
+    ctx.fillStyle = 'rgba(10,0,30,.6)'; ctx.fillRect(0, 0, W, H);
+    text('TERTANGKAP! 👽', W / 2, 270, 46, '#7CFF6B');
+    text('Skor: ' + score(), W / 2, 340, 34);
+    text('Rekor: ' + best, W / 2, 380, 22, '#ffd23f');
+    if (caughtT > .8) text('Tekan SPASI / tap untuk coba lagi', W / 2, 470, 22);
+  }
+}
+
+let last = performance.now();
+function loop(t) {
+  const dt = Math.min(.05, (t - last) / 1000); last = t;
+  update(dt); render(); requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
